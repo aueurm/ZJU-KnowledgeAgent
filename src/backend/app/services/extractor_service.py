@@ -53,8 +53,8 @@ class KnowledgeExtractorService:
         # 构建Prompt
         prompt = self.EXTRACT_PROMPT.format(chapter_content=chapter_content)
 
-        # 调用LLM
-        response = self.llm.call(prompt)
+        # 调用LLM（同步调用）
+        response = self.llm.call_sync(prompt)
 
         # 解析JSON响应
         try:
@@ -72,13 +72,11 @@ class KnowledgeExtractorService:
 
     def _extract_json_from_response(self, response: str) -> Dict:
         """从响应中提取JSON（处理LLM输出格式问题）"""
-        import re
-        # 尝试匹配```json...```或直接匹配{...}
-        json_pattern = r'```json\s*(\{.*?\})\s*```|\{(\{.*?\})'
-        match = re.search(json_pattern, response, re.DOTALL)
-        if match:
+        start = response.find("{")
+        end = response.rfind("}")
+        if start != -1 and end > start:
             try:
-                return json.loads(match.group(1) or match.group(2))
+                return json.loads(response[start:end + 1])
             except json.JSONDecodeError:
                 pass
         return {"nodes": [], "edges": []}

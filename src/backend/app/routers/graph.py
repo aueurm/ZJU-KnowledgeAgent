@@ -1,14 +1,33 @@
 """
 知识图谱路由
 职责：获取教材图谱、节点详情、整合图谱
+共享函数：store_graph, get_rag_service（供其他模块调用）
 """
 from fastapi import APIRouter, HTTPException
+from typing import Optional
 from app.models import GraphData, KnowledgeNode, KnowledgeEdge
+from app.services.rag_service import RAGService
 
 router = APIRouter()
 
-# 模拟图谱数据存储
+# 图谱数据存储
 _graphs: dict = {}
+
+# RAG服务单例
+_rag_service: Optional[RAGService] = None
+
+
+def get_rag_service() -> RAGService:
+    """获取RAG服务单例（供其他模块调用）"""
+    global _rag_service
+    if _rag_service is None:
+        _rag_service = RAGService()
+    return _rag_service
+
+
+def store_graph(textbook_id: str, graph: GraphData):
+    """保存图谱数据（供其他模块调用）"""
+    _graphs[textbook_id] = graph
 
 
 @router.get("/{textbook_id}")
@@ -29,6 +48,8 @@ async def get_merged_graph():
     获取跨教材整合后的知识图谱
     返回：所有教材整合后的图谱数据
     """
+    if "merged" in _graphs:
+        return _graphs["merged"]
     return GraphData(nodes=[], edges=[])
 
 

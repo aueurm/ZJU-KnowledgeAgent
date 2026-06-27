@@ -31,7 +31,7 @@
 
 <script>
 import { ref, onMounted } from 'vue'
-import { getMergeDecisions, mergeTextbooks, confirmMerge as confirmMergeAPI } from '../api'
+import { getMergeDecisions, mergeTextbooks, confirmMerge as confirmMergeApi } from '../api'
 
 export default {
   name: 'MergePanel',
@@ -54,9 +54,9 @@ export default {
       }
     }
 
-    const confirmMergeAPI = async () => {
+    const confirmMerge = async () => {
       try {
-        await confirmMergeAPI()
+        await confirmMergeApi()
         decisions.value = []
         alert('整合已完成')
       } catch (err) {
@@ -65,8 +65,12 @@ export default {
     }
 
     onMounted(async () => {
-      const res = await getMergeDecisions()
-      decisions.value = res.data.decisions || []
+      try {
+        const res = await getMergeDecisions()
+        decisions.value = res.data.decisions || []
+      } catch (err) {
+        console.error('获取决策失败', err)
+      }
     })
 
     return { selectedBooks, decisions, compressionRatio, removeBook, startMerge, confirmMerge }

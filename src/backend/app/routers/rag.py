@@ -1,25 +1,49 @@
 """
 RAG精准问答路由
 职责：建立索引、问答查询、状态查询
+集成RAGService实现真正的RAG功能
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.models import RAGQuery, RAGResponse, RAGStatus, Citation
+from app.routers.graph import get_rag_service
 
 router = APIRouter()
 
 
 @router.post("/index")
-async def build_rag_index():
+async def build_rag_index(textbook_id: str = None):
     """
     为已上传教材建立向量索引
-    返回：索引构建状态
+    如果指定 textbook_id：只为该教材建立索引
+    否则：为所有已解析的教材重建索引
     """
-    # TODO: 调用RAG服务构建向量索引
-    return RAGStatus(
-        indexed_textbooks=0,
-        total_chunks=0,
-        status="ready"
-    )
+    rag_service = get_rag_service()
+
+    if textbook_id:
+        # 为指定教材构建索引
+        from app.routers.upload import _textbooks
+        if textbook_id not in _textbooks:
+            raise HTTPException(status_code=404, detail="教材不存在")
+
+        textbook = _textbooks[textbook_id]
+        if textbook.get("status") != "parsed":
+            raise HTTPException(status_code=400, detail=f"教材状态为 {textbook.get('status')}，需先解析完成")
+
+        # 重建该教材的索引
+        from app.routers.upload import create_chunks
+        chunks = create_chunks(textbook.get("chapters", []), textbook_id)
+        rag_service.build_index(textbook_id, chunks)
+    else:
+        # 重建所有教材的索引
+        from app.routers.upload import _textbooks
+        for tid, textbook in _textbooks.items():
+            if textbook.get("status") == "parsed":
+                from app.routers.upload import create_chunks
+                chunks = create_chunks(textbook.get("chapters", []), tid)
+                rag_service.build_index(tid, chunks)
+
+    status = rag_service.get_status()
+    return RAGStatus(**status)
 
 
 @router.post("/query")
@@ -29,23 +53,13 @@ async def rag_query(query: RAGQuery):
     输入：用户问题
     返回：回答和引用来源
     """
-    # TODO: 调用RAG服务进行问答
-    # 1. 问题转Embedding
-    # 2. 向量检索top-5相关chunks
-    # 3. 构建Prompt调用LLM
-    # 4. 返回带引用的回答
+    rag_service = get_rag_service()
+    result = await rag_service.query(query.question)
 
     return RAGResponse(
-        answer="这是示例回答，实际需要调用RAG服务生成",
-        citations=[
-            Citation(
-                textbook="示例教材",
-                chapter="第一章",
-                page=1,
-                relevance_score=0.95
-            )
-        ],
-        source_chunks=["这是示例原文内容..."]
+        answer=result["answer"],
+        citations=[Citation(**c) for c in result["citations"]],
+        source_chunks=result["source_chunks"]
     )
 
 
@@ -55,8 +69,6 @@ async def get_rag_status():
     查询RAG索引状态
     返回：已索引教材数、知识块总数
     """
-    return RAGStatus(
-        indexed_textbooks=0,
-        total_chunks=0,
-        status="ready"
-    )
+    rag_service = get_rag_service()
+    status = rag_service.get_status()
+    return RAGStatus(**status)
