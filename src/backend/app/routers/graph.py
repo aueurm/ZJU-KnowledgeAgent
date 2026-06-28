@@ -5,7 +5,7 @@
 """
 from fastapi import APIRouter, HTTPException
 from typing import Optional
-from app.models import GraphData, KnowledgeNode, KnowledgeEdge
+from app.models import GraphData
 from app.services.rag_service import RAGService
 
 router = APIRouter()
@@ -28,18 +28,6 @@ def get_rag_service() -> RAGService:
 def store_graph(textbook_id: str, graph: GraphData):
     """保存图谱数据（供其他模块调用）"""
     _graphs[textbook_id] = graph
-
-
-@router.get("/{textbook_id}")
-async def get_textbook_graph(textbook_id: str):
-    """
-    获取单本教材知识图谱
-    返回：该教材的节点和边列表
-    """
-    # 如果没有数据，返回空图谱
-    if textbook_id not in _graphs:
-        return GraphData(nodes=[], edges=[])
-    return _graphs[textbook_id]
 
 
 @router.get("/merged")
@@ -67,6 +55,13 @@ async def get_node_detail(node_id: str):
     raise HTTPException(status_code=404, detail="知识点不存在")
 
 
-def store_graph(textbook_id: str, graph: GraphData):
-    """保存图谱数据（供其他模块调用）"""
-    _graphs[textbook_id] = graph
+@router.get("/{textbook_id}")
+async def get_textbook_graph(textbook_id: str):
+    """
+    获取单本教材知识图谱
+    返回：该教材的节点和边列表
+    """
+    # 如果没有数据，返回空图谱
+    if textbook_id not in _graphs:
+        return GraphData(nodes=[], edges=[])
+    return _graphs[textbook_id]

@@ -7,7 +7,7 @@
     <div class="app-main">
       <!-- 左侧：教材管理 -->
       <aside class="sidebar-left">
-        <UploadZone @uploaded="onUploaded" />
+        <UploadZone @uploaded="onUploaded" @error="loadTextbooks" />
         <TextbookList
           :textbooks="textbooks"
           :selectedId="selectedTextbook"
@@ -19,6 +19,8 @@
       <main class="graph-area">
         <GraphCanvas
           :graphData="currentGraph"
+          :loading="graphLoading"
+          :error="graphError"
           @nodeClick="onNodeClick"
         />
       </main>
@@ -37,7 +39,7 @@
         </div>
 
         <div class="panel-content">
-          <MergePanel v-if="activeTab === 'merge'" />
+          <MergePanel v-if="activeTab === 'merge'" @merged="showMergedGraph" />
           <RAGPanel v-if="activeTab === 'rag'" />
           <ChatPanel v-if="activeTab === 'chat'" />
           <ReportPanel v-if="activeTab === 'report'" />
@@ -55,8 +57,8 @@
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue'
-import { getTextbookList, getGraph } from './api'
+import { ref, onBeforeUnmount, onMounted } from 'vue'
+import { getTextbookList, getGraph, getMergedGraph } from './api'
 
 // 导入组件
 import UploadZone from './components/UploadZone.vue'
@@ -87,6 +89,11 @@ export default {
     const currentGraph = ref({ nodes: [], edges: [] })
     const selectedNode = ref(null)
     const activeTab = ref('merge')
+    const graphLoading = ref(false)
+    const graphError = ref('')
+    let listTimer = null
+    let listLoading = false
+    let graphRequestSeq = 0
 
     // Tab配置
     const tabs = [
@@ -98,22 +105,64 @@ export default {
 
     // 加载教材列表
     const loadTextbooks = async () => {
+      if (listLoading) return
+      listLoading = true
       try {
         const res = await getTextbookList()
         textbooks.value = res.data.textbooks || []
       } catch (err) {
         console.error('加载教材失败', err)
+      } finally {
+        listLoading = false
       }
+    }
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+    const fetchGraphWithRetry = async (textbookId, attempts = 4) => {
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const res = await getGraph(textbookId)
+        const graph = res.data || { nodes: [], edges: [] }
+        if (graph.nodes?.length || attempt === attempts - 1) {
+          return graph
+        }
+        await sleep(350)
+      }
+      return { nodes: [], edges: [] }
     }
 
     // 选择教材
     const selectTextbook = async (textbookId) => {
+      const requestId = ++graphRequestSeq
       selectedTextbook.value = textbookId
+      graphLoading.value = true
+      graphError.value = ''
+      currentGraph.value = { nodes: [], edges: [] }
       try {
-        const res = await getGraph(textbookId)
-        currentGraph.value = res.data
+        const book = textbooks.value.find(item => item.textbook_id === textbookId)
+        if (book?.status === 'parsing') {
+          graphError.value = `教材仍在解析中：${book.current_step || `${book.progress || 0}%`}`
+          return
+        }
+        if (book?.status === 'failed') {
+          graphError.value = book.error || '教材解析失败，请重新上传或检查文件内容'
+          return
+        }
+
+        const graph = await fetchGraphWithRetry(textbookId)
+        if (requestId !== graphRequestSeq) return
+        currentGraph.value = graph
+        if (!graph.nodes?.length) {
+          graphError.value = '该教材已完成解析，但暂未生成图谱数据。请查看左侧是否有解析警告。'
+        }
       } catch (err) {
+        if (requestId !== graphRequestSeq) return
+        graphError.value = err.response?.data?.detail || err.message || '图谱加载失败'
         console.error('加载图谱失败', err)
+      } finally {
+        if (requestId === graphRequestSeq) {
+          graphLoading.value = false
+        }
       }
     }
 
@@ -127,9 +176,38 @@ export default {
       selectedNode.value = node
     }
 
+    const showMergedGraph = async () => {
+      const requestId = ++graphRequestSeq
+      graphLoading.value = true
+      graphError.value = ''
+      try {
+        const res = await getMergedGraph()
+        const graph = res.data || { nodes: [], edges: [] }
+        if (requestId !== graphRequestSeq) return
+        currentGraph.value = graph
+        selectedTextbook.value = 'merged'
+        if (!graph.nodes?.length) {
+          graphError.value = '暂无整合图谱，请先完成跨教材整合。'
+        }
+      } catch (err) {
+        if (requestId !== graphRequestSeq) return
+        graphError.value = err.response?.data?.detail || err.message || '整合图谱加载失败'
+        console.error('加载整合图谱失败', err)
+      } finally {
+        if (requestId === graphRequestSeq) {
+          graphLoading.value = false
+        }
+      }
+    }
+
     // 初始化
     onMounted(() => {
       loadTextbooks()
+      listTimer = setInterval(loadTextbooks, 1500)
+    })
+
+    onBeforeUnmount(() => {
+      if (listTimer) clearInterval(listTimer)
     })
 
     return {
@@ -138,11 +216,14 @@ export default {
       currentGraph,
       selectedNode,
       activeTab,
+      graphLoading,
+      graphError,
       tabs,
       loadTextbooks,
       selectTextbook,
       onUploaded,
-      onNodeClick
+      onNodeClick,
+      showMergedGraph
     }
   }
 }

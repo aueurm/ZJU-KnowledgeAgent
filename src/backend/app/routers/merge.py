@@ -3,10 +3,12 @@
 职责：执行跨教材整合、获取决策、确认修改
 集成MergeService实现真正的跨教材整合
 """
-from fastapi import APIRouter, HTTPException
+import os
 from typing import List
 
-from app.models import MergeRequest, MergeResult, MergeDecision, GraphData
+from fastapi import APIRouter, HTTPException
+
+from app.models import MergeRequest, MergeResult, MergeDecision, GraphData, ModifyDecisionRequest
 from app.services.merge_service import MergeService
 from app.routers.graph import _graphs, store_graph
 
@@ -19,6 +21,7 @@ _merge_decisions: List[MergeDecision] = []
 _last_merge_stats: dict = {}
 
 
+@router.post("", response_model=MergeResult)
 @router.post("/", response_model=MergeResult)
 async def merge_textbooks(request: MergeRequest):
     """
@@ -32,8 +35,8 @@ async def merge_textbooks(request: MergeRequest):
         if tid in _graphs:
             graphs.append(_graphs[tid].dict())
 
-    if not graphs:
-        raise HTTPException(status_code=404, detail="未找到指定的教材图谱")
+    if len(graphs) < 2:
+        raise HTTPException(status_code=400, detail="至少需要 2 本已生成图谱的教材")
 
     # 2. 调用合并服务
     merge_service = MergeService()
@@ -46,7 +49,7 @@ async def merge_textbooks(request: MergeRequest):
     global _merge_decisions
     _merge_decisions = decisions
 
-    # 5. 计算压缩比
+    # 5. 计算压缩比和完整性指标
     original_chars = sum(
         sum(len(n.get("definition", "")) for n in g.get("nodes", []))
         for g in graphs
@@ -56,22 +59,46 @@ async def merge_textbooks(request: MergeRequest):
         for n in merged_graph.get("nodes", [])
     )
 
+    compression_ratio = merged_chars / original_chars if original_chars > 0 else 0
+    original_nodes = sum(len(g.get("nodes", [])) for g in graphs)
+    merged_nodes = len(merged_graph.get("nodes", []))
+    original_edges = sum(len(g.get("edges", [])) for g in graphs)
+    merged_edges = len(merged_graph.get("edges", []))
+    node_retention_ratio = merged_nodes / original_nodes if original_nodes > 0 else 1
+    edge_retention_ratio = merged_edges / original_edges if original_edges > 0 else 1
+
+    min_node_retention = float(os.getenv("MIN_NODE_RETENTION", "0.35"))
+    min_edge_retention = float(os.getenv("MIN_EDGE_RETENTION", "0.50"))
+    warnings = []
+    if node_retention_ratio < min_node_retention:
+        warnings.append(f"节点保留率低于 {min_node_retention:.0%}，建议人工检查合并决策")
+    if original_edges > 0 and edge_retention_ratio < min_edge_retention:
+        warnings.append(f"关系边保留率低于 {min_edge_retention:.0%}，建议人工检查关系完整性")
+    completeness_warning = "；".join(warnings) if warnings else None
+
     # 保存统计信息
     global _last_merge_stats
     _last_merge_stats = {
         "original_count": len(graphs),
         "original_chars": original_chars,
-        "original_nodes": sum(len(g.get("nodes", [])) for g in graphs),
-        "merged_nodes": len(merged_graph.get("nodes", [])),
-        "edge_count": len(merged_graph.get("edges", [])),
-        "compression_ratio": 1 - (merged_chars / original_chars) if original_chars > 0 else 0
+        "original_nodes": original_nodes,
+        "merged_nodes": merged_nodes,
+        "original_edges": original_edges,
+        "edge_count": merged_edges,
+        "compression_ratio": compression_ratio,
+        "node_retention_ratio": node_retention_ratio,
+        "edge_retention_ratio": edge_retention_ratio,
+        "completeness_warning": completeness_warning
     }
 
     return MergeResult(
         decisions=decisions,
-        compression_ratio=1 - (merged_chars / original_chars) if original_chars > 0 else 0,
+        compression_ratio=compression_ratio,
         original_chars=original_chars,
-        merged_chars=merged_chars
+        merged_chars=merged_chars,
+        node_retention_ratio=node_retention_ratio,
+        edge_retention_ratio=edge_retention_ratio,
+        completeness_warning=completeness_warning
     )
 
 
@@ -105,14 +132,14 @@ async def confirm_merge():
 
 
 @router.post("/modify")
-async def modify_decision(decision_id: str, new_action: str):
+async def modify_decision(request: ModifyDecisionRequest):
     """
     修改整合决策
     输入：决策ID和新操作类型
     返回：更新后的决策列表
     """
     for decision in _merge_decisions:
-        if decision.decision_id == decision_id:
-            decision.action = new_action
-            return {"message": f"决策 {decision_id} 已更新为 {new_action}"}
+        if decision.decision_id == request.decision_id:
+            decision.action = request.new_action
+            return {"message": f"决策 {request.decision_id} 已更新为 {request.new_action}"}
     raise HTTPException(status_code=404, detail="决策不存在")

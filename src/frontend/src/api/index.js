@@ -17,11 +17,17 @@ const api = axios.create({
  * @param {File} file - 文件对象
  * @returns {Promise} 教材信息
  */
-export const uploadTextbook = (file) => {
+export const uploadTextbook = (file, onProgress) => {
   const formData = new FormData()
   formData.append('file', file)
   return api.post('/upload/', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
+    onUploadProgress: (event) => {
+      if (event.total && onProgress) {
+        onProgress(Math.round((event.loaded * 100) / event.total))
+      }
+    }
   })
 }
 
@@ -37,6 +43,8 @@ export const getTextbookList = () => api.get('/upload/list')
  * @returns {Promise} 教材详情
  */
 export const getTextbookDetail = (textbookId) => api.get(`/upload/${textbookId}`)
+
+export const getTextbookStatus = (textbookId) => api.get(`/upload/status/${textbookId}`)
 
 // ==================== 知识图谱相关API ====================
 

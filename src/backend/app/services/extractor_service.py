@@ -3,6 +3,7 @@
 职责：调用LLM从章节内容中提取知识点和关系
 """
 import json
+import os
 from typing import List, Dict
 from app.models import KnowledgeNode, KnowledgeEdge
 
@@ -54,7 +55,14 @@ class KnowledgeExtractorService:
         prompt = self.EXTRACT_PROMPT.format(chapter_content=chapter_content)
 
         # 调用LLM（同步调用）
-        response = self.llm.call_sync(prompt)
+        response = self.llm.call_sync(
+            prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            max_tokens=int(os.getenv("LLM_EXTRACT_MAX_TOKENS", "4096"))
+        )
+        if response.startswith("LLM调用失败"):
+            raise RuntimeError(response)
 
         # 解析JSON响应
         try:

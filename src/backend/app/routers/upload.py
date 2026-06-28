@@ -23,6 +23,12 @@ logger = get_logger(__name__)
 _textbooks: dict = {}
 
 
+def update_textbook_status(textbook_id: str, **fields):
+    """更新教材状态，后台任务和轮询接口共用。"""
+    if textbook_id in _textbooks:
+        _textbooks[textbook_id].update(fields)
+
+
 @router.post("", response_model=TextbookUploadResponse)
 @router.post("/", response_model=TextbookUploadResponse)
 async def upload_textbook(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
@@ -60,6 +66,10 @@ async def upload_textbook(file: UploadFile = File(...), background_tasks: Backgr
         "total_pages": 0,
         "total_chars": 0,
         "status": "parsing",
+        "progress": 0,
+        "current_step": "已接收文件，等待解析",
+        "error": None,
+        "warning": None,
         "chapters": []
     }
 
@@ -83,6 +93,7 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
     logger.info("开始后台处理管道，教材ID: %s", textbook_id)
     try:
         # Step 1: 解析文件
+        update_textbook_status(textbook_id, progress=5, current_step="正在解析文件")
         from app.services.parser_service import get_parser_service
         parser = get_parser_service(file_path)
         loop = asyncio.get_event_loop()
@@ -93,7 +104,16 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
         )
 
         # 更新状态
-        _textbooks[textbook_id]["total_pages"] = parsed_data["total_pages"]
+        chapters = parsed_data["chapters"]
+        if not chapters:
+            raise ValueError("PDF 未提取到可解析文本，请确认文件不是扫描版图片 PDF")
+
+        update_textbook_status(
+            textbook_id,
+            total_pages=parsed_data["total_pages"],
+            progress=20,
+            current_step=f"文件解析完成，共 {len(chapters)} 个内容片段"
+        )
 
         # Step 2: 知识提取
         from app.services.extractor_service import KnowledgeExtractorService
@@ -101,14 +121,8 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
         llm_client = get_llm_client()
         extractor = KnowledgeExtractorService(llm_client)
 
-        all_nodes = []
-        all_edges = []
-        total_chars = 0
-
-        # 逐章节提取知识
-        for chapter_data in parsed_data["chapters"]:
-            # 转换章节数据 - 直接用对象属性
-            chapter = Chapter(
+        normalized_chapters = [
+            Chapter(
                 chapter_id=chapter_data.chapter_id,
                 title=chapter_data.title,
                 page_start=chapter_data.page_start,
@@ -116,36 +130,74 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
                 content=chapter_data.content,
                 char_count=chapter_data.char_count
             )
-            total_chars += chapter.char_count
+            for chapter_data in chapters
+        ]
+        total_chars = sum(chapter.char_count for chapter in normalized_chapters)
+        concurrency = max(1, int(os.getenv("EXTRACT_CONCURRENCY", "3")))
+        semaphore = asyncio.Semaphore(concurrency)
+        completed = 0
 
-            # 调用LLM提取知识
-            result = await loop.run_in_executor(
-                None,
-                extractor.extract,
-                chapter.content,
-                chapter.title,
-                textbook_id
-            )
+        async def extract_one(index: int, chapter: Chapter):
+            nonlocal completed
+            async with semaphore:
+                update_textbook_status(
+                    textbook_id,
+                    progress=20 + int(65 * completed / len(normalized_chapters)),
+                    current_step=f"正在提取知识 {completed}/{len(normalized_chapters)}（并发 {concurrency}）：{chapter.title}"
+                )
+                result = await loop.run_in_executor(
+                    None,
+                    extractor.extract,
+                    chapter.content,
+                    chapter.title,
+                    textbook_id
+                )
+                completed += 1
+                update_textbook_status(
+                    textbook_id,
+                    progress=20 + int(65 * completed / len(normalized_chapters)),
+                    current_step=f"已提取知识 {completed}/{len(normalized_chapters)}：{chapter.title}"
+                )
+                return index, chapter, result
 
-            # 添加节点和边
+        results = await asyncio.gather(*[
+            extract_one(index, chapter)
+            for index, chapter in enumerate(normalized_chapters, start=1)
+        ])
+
+        all_nodes = []
+        all_edges = []
+        for _, chapter, result in sorted(results, key=lambda item: item[0]):
             node_ids = {}
             for node in result.get("nodes", []):
                 old_id = node.get("id") or f"n{len(node_ids) + 1}"
                 node["id"] = f"{textbook_id}_{chapter.chapter_id}_{old_id}"
                 node_ids[old_id] = node["id"]
+                node.setdefault("name", old_id)
+                node.setdefault("definition", "")
+                node.setdefault("category", "知识点")
                 node["source"] = textbook_id
                 node["chapter"] = chapter.title
                 node.setdefault("page", max(1, chapter.page_start))
                 all_nodes.append(node)
 
             for edge in result.get("edges", []):
+                if not edge.get("source") or not edge.get("target"):
+                    continue
                 edge["source"] = node_ids.get(edge["source"], edge["source"])
                 edge["target"] = node_ids.get(edge["target"], edge["target"])
                 all_edges.append(edge)
 
+        if not all_nodes:
+            raise ValueError("知识提取未返回节点，请检查 LLM_API_BASE、LLM_MODEL 和 API Key 是否可用")
+
         # 更新字数统计
-        _textbooks[textbook_id]["total_chars"] = total_chars
-        _textbooks[textbook_id]["chapters"] = [
+        update_textbook_status(
+            textbook_id,
+            total_chars=total_chars,
+            progress=88,
+            current_step="正在保存图谱",
+            chapters=[
             {
                 "chapter_id": c.chapter_id,
                 "title": c.title,
@@ -154,8 +206,9 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
                 "content": c.content,
                 "char_count": c.char_count
             }
-            for c in parsed_data["chapters"]
-        ]
+            for c in normalized_chapters
+            ]
+        )
 
         # Step 3: 存储图谱
         from app.models import GraphData
@@ -163,17 +216,34 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
         store_graph(textbook_id, graph_data)
 
         # Step 4: 构建RAG索引
-        rag_service = get_rag_service()
-        chunks = create_chunks(parsed_data["chapters"], textbook_id)
-        await loop.run_in_executor(None, rag_service.build_index, textbook_id, chunks)
+        update_textbook_status(textbook_id, progress=92, current_step="正在建立 RAG 索引")
+        warning = None
+        try:
+            rag_service = get_rag_service()
+            chunks = create_chunks(normalized_chapters, textbook_id)
+            await loop.run_in_executor(None, rag_service.build_index, textbook_id, chunks)
+        except Exception as e:
+            warning = f"RAG 索引失败：{e}"
+            logger.error("RAG索引失败，ID: %s | 错误: %s", textbook_id, str(e), exc_info=True)
 
         # Step 5: 更新状态为完成
-        _textbooks[textbook_id]["status"] = "parsed"
+        update_textbook_status(
+            textbook_id,
+            status="parsed",
+            progress=100,
+            current_step="解析完成",
+            warning=warning
+        )
         logger.info("教材处理完成，ID: %s | 总字数: %d", textbook_id, total_chars)
 
     except Exception as e:
-        _textbooks[textbook_id]["status"] = "failed"
-        _textbooks[textbook_id]["error"] = str(e)
+        update_textbook_status(
+            textbook_id,
+            status="failed",
+            progress=100,
+            current_step="处理失败",
+            error=str(e)
+        )
         logger.error("教材处理失败，ID: %s | 错误: %s", textbook_id, str(e), exc_info=True)
 
     finally:
@@ -258,7 +328,10 @@ async def get_textbook_status(textbook_id: str):
     return {
         "textbook_id": textbook_id,
         "status": textbook["status"],
+        "progress": textbook.get("progress", 0),
+        "current_step": textbook.get("current_step", ""),
         "total_pages": textbook.get("total_pages", 0),
         "total_chars": textbook.get("total_chars", 0),
-        "error": textbook.get("error", None)
+        "error": textbook.get("error", None),
+        "warning": textbook.get("warning", None)
     }

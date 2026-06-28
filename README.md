@@ -42,7 +42,6 @@ pip install -r requirements.txt
 ### 3. 前端安装
 
 ```bash
-cd src/frontend
 npm install
 ```
 
@@ -55,8 +54,18 @@ npm install
 ```env
 # LLM API配置（必填）
 LLM_API_KEY=your_api_key_here
-LLM_API_BASE=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
+LLM_API_BASE=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-flash
+LLM_TIMEOUT=120
+LLM_MAX_RETRIES=3
+LLM_THINKING=disabled
+LLM_EXTRACT_MAX_TOKENS=4096
+EXTRACT_CONCURRENCY=3
+MERGE_HIGH_THRESHOLD=0.92
+MERGE_MID_THRESHOLD=0.80
+MERGE_NAME_THRESHOLD=0.75
+MIN_NODE_RETENTION=0.35
+MIN_EDGE_RETENTION=0.50
 
 # Embedding模型配置（可选，默认本地BGE）
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
@@ -77,13 +86,22 @@ cp .env.example .env
 
 ## 启动命令
 
+### 一键启动
+
+```bash
+python start.py
+```
+
+启动后浏览器会自动打开 `http://localhost:5173`。
+
 ### 开发模式
 
 ```bash
-# 启动后端（根目录）
-python -m uvicorn src.backend.main:app --reload --port 8000
+# 启动后端
+cd src/backend
+python -m uvicorn app.main:app --reload --port 8000
 
-# 启动前端（src/frontend目录）
+# 另开终端，回到仓库根目录启动前端
 npm run dev
 ```
 
@@ -91,9 +109,10 @@ npm run dev
 
 ```bash
 # 后端
-python -m uvicorn src.backend.main:app --host 0.0.0.0 --port 8000
+cd src/backend
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 前端构建
+# 另开终端，回到仓库根目录构建前端
 npm run build
 # 部署dist目录
 ```

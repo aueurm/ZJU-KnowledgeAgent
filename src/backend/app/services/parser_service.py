@@ -3,9 +3,8 @@ PDF文件解析服务
 职责：解析PDF/MD/TXT/DOCX教材文件，提取章节结构和内容
 """
 import re
-import os
 from pathlib import Path
-from typing import List, Dict, Union
+from typing import List, Dict
 from app.models import Chapter
 
 try:
@@ -19,6 +18,7 @@ class PDFParserService:
 
     def __init__(self):
         self.chapter_pattern = re.compile(r'^第[一二三四五六七八九十百千万\d]+章\s*')
+        self.max_chars = 8000
 
     def parse(self, file_path: str) -> Dict:
         """解析PDF文件"""
@@ -44,8 +44,14 @@ class PDFParserService:
 
             if chapter_title:
                 if current_chapter:
-                    chapters.append(self._create_chapter(current_chapter, current_content, page_num - len(current_content) + 1, chapter_index))
-                    chapter_index += 1
+                    new_chapters = self._create_chapters(
+                        current_chapter,
+                        current_content,
+                        page_num - len(current_content) + 1,
+                        chapter_index
+                    )
+                    chapters.extend(new_chapters)
+                    chapter_index += len(new_chapters)
                 current_chapter = chapter_title
                 current_content = [text]
             else:
@@ -53,9 +59,15 @@ class PDFParserService:
                     current_content.append(text)
 
         if current_chapter:
-            chapters.append(self._create_chapter(current_chapter, current_content, page_num - len(current_content) + 2, chapter_index))
+            new_chapters = self._create_chapters(
+                current_chapter,
+                current_content,
+                page_num - len(current_content) + 2,
+                chapter_index
+            )
+            chapters.extend(new_chapters)
         elif all_content:
-            chapters.append(self._create_chapter("全文", all_content, 1, 0))
+            chapters.extend(self._create_chapters("全文", all_content, 1, 0))
 
         doc.close()
         return {"total_pages": page_count, "chapters": chapters}
@@ -75,8 +87,30 @@ class PDFParserService:
                 return line
         return None
 
+    def _create_chapters(self, title: str, contents: List[str], start_page: int, chapter_index: int) -> List[Chapter]:
+        chapters = []
+        current = []
+        current_len = 0
+        current_start = start_page
+
+        for offset, text in enumerate(contents):
+            if current and current_len + len(text) > self.max_chars:
+                chapters.append(self._create_chapter(title, current, current_start, chapter_index + len(chapters)))
+                current = []
+                current_len = 0
+                current_start = start_page + offset
+            current.append(text)
+            current_len += len(text)
+
+        if current:
+            chapters.append(self._create_chapter(title, current, current_start, chapter_index + len(chapters)))
+
+        return chapters
+
     def _create_chapter(self, title: str, contents: List[str], start_page: int, chapter_index: int) -> Chapter:
         content = '\n'.join(contents)
+        if len(content) > self.max_chars:
+            content = content[:self.max_chars]
         return Chapter(
             chapter_id=f"ch_{chapter_index:03d}",
             title=title,

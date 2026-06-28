@@ -13,6 +13,8 @@ sentence-transformers>=2.2.0
 
 # LLM调用
 openai>=1.0.0
+httpx>=0.24.0
+requests>=2.31.0
 
 # 数据处理
 pandas>=2.0.0

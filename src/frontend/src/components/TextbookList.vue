@@ -16,7 +16,14 @@
         <div class="book-name">{{ book.filename }}</div>
         <div class="book-status">
           <span :class="['status', book.status]">{{ getStatusText(book.status) }}</span>
+          <span v-if="book.status === 'parsing'" class="progress-text">{{ book.progress || 0 }}%</span>
         </div>
+        <div v-if="book.status === 'parsing'" class="progress-track">
+          <div class="progress-bar" :style="{ width: (book.progress || 0) + '%' }"></div>
+        </div>
+        <div v-if="book.current_step" class="book-step">{{ book.current_step }}</div>
+        <div v-if="book.warning" class="book-warning">{{ book.warning }}</div>
+        <div v-if="book.error" class="book-error">{{ book.error }}</div>
       </div>
     </div>
   </div>
@@ -64,7 +71,39 @@ export default {
 
 .book-icon { font-size: 24px; margin-right: 12px; }
 .book-name { font-size: 14px; color: #333; }
-.book-status { margin-top: 4px; }
+.book-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.progress-text {
+  color: #999;
+  font-size: 12px;
+}
+.progress-track {
+  height: 5px;
+  margin-top: 6px;
+  background: #f0f0f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  background: #1890ff;
+  transition: width 0.2s ease;
+}
+.book-step,
+.book-warning,
+.book-error {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.book-step { color: #888; }
+.book-warning { color: #fa8c16; }
+.book-error { color: #ff4d4f; }
 .status {
   font-size: 12px;
   padding: 2px 6px;
