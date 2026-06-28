@@ -2,6 +2,7 @@
 对话交互路由
 职责：处理用户对话、修改整合决策
 """
+import re
 from fastapi import APIRouter
 from typing import Dict, List
 from app.models import ChatRequest, ChatResponse, ChatMessage
@@ -12,6 +13,48 @@ router = APIRouter()
 _chat_histories: Dict[str, List[ChatMessage]] = {}
 
 
+def _find_decision(decision_id: str):
+    from app.routers.merge import _merge_decisions
+
+    for decision in _merge_decisions:
+        if decision.decision_id == decision_id:
+            return decision
+    return None
+
+
+def _handle_message(message: str):
+    from app.routers.merge import _merge_decisions
+
+    match = re.search(r"(merge_\d+).*(改为|改成|设为|设置为)\s*(merge|keep|remove)", message, re.I)
+    if match:
+        decision = _find_decision(match.group(1))
+        if not decision:
+            return f"未找到决策 {match.group(1)}", None
+        decision.action = match.group(3).lower()
+        return f"已将 {decision.decision_id} 修改为 {decision.action}", f"{decision.decision_id} -> {decision.action}"
+
+    match = re.search(r"(merge_\d+)", message, re.I)
+    if match:
+        decision = _find_decision(match.group(1))
+        if not decision:
+            return f"未找到决策 {match.group(1)}", None
+        return (
+            f"{decision.decision_id} 当前建议为 {decision.action}。"
+            f"理由：{decision.reason}。置信度：{decision.confidence:.2f}",
+            None
+        )
+
+    if not _merge_decisions:
+        return "当前还没有整合决策。请先在整合面板选择至少 2 本已解析教材并开始整合。", None
+
+    lines = [
+        f"{d.decision_id}: {d.action}，置信度 {d.confidence:.2f}，{d.reason}"
+        for d in _merge_decisions[:5]
+    ]
+    return "当前主要整合决策：\n" + "\n".join(lines), None
+
+
+@router.post("")
 @router.post("/")
 async def chat(request: ChatRequest):
     """
@@ -30,13 +73,7 @@ async def chat(request: ChatRequest):
         ChatMessage(role="user", content=request.message)
     )
 
-    # TODO: 调用对话服务处理消息
-    # 1. 解析用户意图
-    # 2. 如需修改决策，调用整合服务
-    # 3. 生成回复
-
-    reply = "这是示例回复，实际需要调用对话服务生成"
-    action_taken = None  # 如修改了整合决策，说明操作
+    reply, action_taken = _handle_message(request.message)
 
     # 添加助手回复
     _chat_histories[session_id].append(

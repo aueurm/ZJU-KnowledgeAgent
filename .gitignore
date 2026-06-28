@@ -56,10 +56,13 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+dist_check/
 
 # ==================== IDE和编辑器 ====================
 .vscode/
 .idea/
+.claude/
+.qoder/
 *.swp
 *.swo
 *~

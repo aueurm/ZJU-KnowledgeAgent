@@ -2,11 +2,7 @@
 RAG问答服务
 职责：构建向量索引、检索相关chunk、生成回答
 """
-import chromadb
-from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
-from typing import List, Optional
-import uuid
+from typing import List
 
 from app.services.llm_client import get_llm_client
 
@@ -15,38 +11,71 @@ class RAGService:
     """RAG服务"""
 
     def __init__(self, persist_dir: str = "./data/embeddings"):
-        # 初始化向量数据库
-        self.chroma_client = chromadb.PersistentClient(
-            path=persist_dir,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        self.collection = self.chroma_client.get_or_create_collection(
-            name="textbook_chunks",
-            metadata={"hnsw:space": "cosine"}
-        )
+        self.collection = None
+        self.embedding_model = None
+        self.memory_chunks = []
 
-        # 初始化Embedding模型
-        self.embedding_model = SentenceTransformer('BAAI/bge-small-zh-v1.5')
+        try:
+            import os
+            import chromadb
+            from chromadb.config import Settings
+            from sentence_transformers import SentenceTransformer
+
+            self.chroma_client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            self.collection = self.chroma_client.get_or_create_collection(
+                name="textbook_chunks",
+                metadata={"hnsw:space": "cosine"}
+            )
+            model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+            self.embedding_model = SentenceTransformer(model_name, local_files_only=True)
+        except Exception:
+            # ponytail: 无 Chroma/BGE 时用内存检索兜底，演示可跑；生产装 requirements 后自动用向量库。
+            self.collection = None
+            self.embedding_model = None
 
     def build_index(self, textbook_id: str, chunks: List[dict]):
         """
         为教材构建向量索引
         输入：教材ID、知识块列表
         """
+        if not self.collection:
+            self.memory_chunks = [
+                item for item in self.memory_chunks
+                if item.get("textbook") != textbook_id
+            ]
+            self.memory_chunks.extend(chunks)
+            return
+
+        old = self.collection.get(where={"textbook": textbook_id})
+        if old.get("ids"):
+            self.collection.delete(ids=old["ids"])
+
+        embeddings = []
+        documents = []
+        metadatas = []
+        ids = []
         for chunk in chunks:
             # 生成向量
             embedding = self.embedding_model.encode(chunk["content"])
 
-            # 添加到向量库
-            self.collection.add(
-                embeddings=[embedding.tolist()],
-                documents=[chunk["content"]],
-                metadatas=[{
-                    "textbook": chunk.get("textbook", ""),
-                    "chapter": chunk.get("chapter", ""),
-                    "page": chunk.get("page", 0)
-                }],
-                ids=[f"{textbook_id}_{chunk['chunk_id']}"]
+            embeddings.append(embedding.tolist())
+            documents.append(chunk["content"])
+            metadatas.append({
+                "textbook": chunk.get("textbook", textbook_id),
+                "chapter": chunk.get("chapter", ""),
+                "page": chunk.get("page", 0)
+            })
+            ids.append(f"{textbook_id}_{chunk['chunk_id']}")
+
+        if ids:
+            self.collection.upsert(
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
             )
 
     def retrieve(self, question: str, top_k: int = 5) -> List[dict]:
@@ -55,6 +84,9 @@ class RAGService:
         输入：问题、返回数量
         返回：相关chunks列表
         """
+        if not self.collection:
+            return self._memory_retrieve(question, top_k)
+
         # 问题转向量
         question_embedding = self.embedding_model.encode(question)
 
@@ -76,6 +108,28 @@ class RAGService:
             })
 
         return chunks
+
+    def _memory_retrieve(self, question: str, top_k: int) -> List[dict]:
+        q_chars = {c for c in question.lower() if not c.isspace()}
+        scored = []
+        for chunk in self.memory_chunks:
+            content = chunk.get("content", "")
+            c_chars = {c for c in content.lower() if not c.isspace()}
+            score = len(q_chars & c_chars) / len(q_chars | c_chars) if q_chars and c_chars else 0
+            if score > 0:
+                scored.append((score, chunk))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [
+            {
+                "content": chunk.get("content", ""),
+                "textbook": chunk.get("textbook", ""),
+                "chapter": chunk.get("chapter", ""),
+                "page": chunk.get("page", 0),
+                "relevance_score": score
+            }
+            for score, chunk in scored[:top_k]
+        ]
 
     async def query(self, question: str) -> dict:
         """
@@ -135,9 +189,22 @@ class RAGService:
 
     def get_status(self) -> dict:
         """获取索引状态"""
+        if not self.collection:
+            textbooks = {
+                chunk.get("textbook", "")
+                for chunk in self.memory_chunks
+                if chunk.get("textbook")
+            }
+            return {
+                "indexed_textbooks": len(textbooks),
+                "total_chunks": len(self.memory_chunks),
+                "status": "ready"
+            }
+
+        data = self.collection.get(include=["metadatas"])
         return {
             "indexed_textbooks": len(set(
-                id.split("_")[0] for id in self.collection.get()["ids"]
+                item.get("textbook", "") for item in data.get("metadatas", []) if item.get("textbook")
             )),
             "total_chunks": self.collection.count(),
             "status": "ready"

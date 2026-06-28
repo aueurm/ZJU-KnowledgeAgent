@@ -15,8 +15,8 @@
         <div class="value">{{ stats.original_chars.toLocaleString() }} 字</div>
       </div>
       <div class="stat-item">
-        <div class="label">压缩比</div>
-        <div class="value" :class="{ warning: stats.compression_ratio > 0.3 }">
+        <div class="label">内容保留率</div>
+        <div class="value" :class="{ warning: stats.completeness_warning }">
           {{ (stats.compression_ratio * 100).toFixed(1) }}%
         </div>
       </div>
@@ -36,11 +36,17 @@
       <h5>图谱统计</h5>
       <div>整合前节点: {{ stats.original_nodes }}</div>
       <div>整合后节点: {{ stats.merged_nodes }}</div>
+      <div>节点保留率: {{ (stats.node_retention_ratio * 100).toFixed(1) }}%</div>
       <div>关系边数: {{ stats.edge_count }}</div>
+      <div>关系边保留率: {{ (stats.edge_retention_ratio * 100).toFixed(1) }}%</div>
+    </div>
+
+    <div v-if="stats.completeness_warning" class="warning-box">
+      {{ stats.completeness_warning }}
     </div>
 
     <div v-if="hasData" class="compression-info">
-      压缩比 = 整合后节点数 / 整合前节点数
+      内容保留率 = 整合后定义字数 / 原始定义字数
     </div>
 
     <button class="btn-export" @click="exportReport" :disabled="!hasData">导出报告</button>
@@ -49,7 +55,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue'
+import { ref, onBeforeUnmount, onMounted } from 'vue'
 import { getMergeStats, getMergeDecisions, getMergedGraph } from '../api'
 
 export default {
@@ -62,14 +68,21 @@ export default {
       compression_ratio: 0,
       original_nodes: 0,
       merged_nodes: 0,
-      edge_count: 0
+      edge_count: 0,
+      node_retention_ratio: 0,
+      edge_retention_ratio: 0,
+      completeness_warning: ''
     })
 
     const decisionsSummary = ref({ merge: 0, keep: 0, remove: 0 })
     const hasData = ref(false)
+    let refreshTimer = null
 
     const exportReport = () => {
-      const content = `# 整合报告\n\n## 整合概览\n\n| 指标 | 数值 |\n|------|------|\n| 原始教材 | ${stats.value.original_count}本 |\n| 原始字数 | ${stats.value.original_chars.toLocaleString()} |\n| 压缩比 | ${(stats.value.compression_ratio * 100).toFixed(1)}% |\n\n## 图谱统计\n\n| 指标 | 数值 |\n|------|------|\n| 整合前节点 | ${stats.value.original_nodes} |\n| 整合后节点 | ${stats.value.merged_nodes} |\n| 关系边数 | ${stats.value.edge_count} |\n\n## 决策摘要\n\n| 操作 | 数量 |\n|------|------|\n| 合并 | ${decisionsSummary.value.merge} |\n| 保留 | ${decisionsSummary.value.keep} |\n| 删除 | ${decisionsSummary.value.remove} |\n`
+      const warning = stats.value.completeness_warning
+        ? `\n## 完整性提示\n\n${stats.value.completeness_warning}\n`
+        : ''
+      const content = `# 整合报告\n\n## 整合概览\n\n| 指标 | 数值 |\n|------|------|\n| 原始教材 | ${stats.value.original_count}本 |\n| 原始字数 | ${stats.value.original_chars.toLocaleString()} |\n| 内容保留率 | ${(stats.value.compression_ratio * 100).toFixed(1)}% |\n| 节点保留率 | ${(stats.value.node_retention_ratio * 100).toFixed(1)}% |\n\n## 图谱统计\n\n| 指标 | 数值 |\n|------|------|\n| 整合前节点 | ${stats.value.original_nodes} |\n| 整合后节点 | ${stats.value.merged_nodes} |\n| 关系边数 | ${stats.value.edge_count} |\n| 关系边保留率 | ${(stats.value.edge_retention_ratio * 100).toFixed(1)}% |\n${warning}\n## 决策摘要\n\n| 操作 | 数量 |\n|------|------|\n| 合并 | ${decisionsSummary.value.merge} |\n| 保留 | ${decisionsSummary.value.keep} |\n| 删除 | ${decisionsSummary.value.remove} |\n`
       const blob = new Blob([content], { type: 'text/markdown' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -78,7 +91,7 @@ export default {
       a.click()
     }
 
-    onMounted(async () => {
+    const loadReport = async () => {
       try {
         const [statsRes, decisionsRes, graphRes] = await Promise.all([
           getMergeStats(),
@@ -103,7 +116,10 @@ export default {
           compression_ratio: mergeStats.compression_ratio || 0,
           original_nodes: mergeStats.original_nodes || 0,
           merged_nodes: mergeStats.merged_nodes || 0,
-          edge_count: mergeStats.edge_count || mergedGraph.edges?.length || 0
+          edge_count: mergeStats.edge_count || mergedGraph.edges?.length || 0,
+          node_retention_ratio: mergeStats.node_retention_ratio || 0,
+          edge_retention_ratio: mergeStats.edge_retention_ratio || 0,
+          completeness_warning: mergeStats.completeness_warning || ''
         }
 
         decisionsSummary.value = summary
@@ -113,6 +129,15 @@ export default {
       } finally {
         loading.value = false
       }
+    }
+
+    onMounted(async () => {
+      await loadReport()
+      refreshTimer = setInterval(loadReport, 2000)
+    })
+
+    onBeforeUnmount(() => {
+      if (refreshTimer) clearInterval(refreshTimer)
     })
 
     return { stats, decisionsSummary, exportReport, hasData, loading }
@@ -163,6 +188,17 @@ export default {
 .graph-stats { margin-bottom: 20px; }
 .graph-stats h5 { font-size: 14px; margin-bottom: 8px; }
 .graph-stats div { font-size: 13px; color: #666; margin-bottom: 4px; }
+
+.warning-box {
+  margin-bottom: 16px;
+  padding: 10px;
+  border: 1px solid #ffe58f;
+  border-radius: 4px;
+  background: #fffbe6;
+  color: #ad6800;
+  font-size: 13px;
+  line-height: 1.5;
+}
 
 .compression-info {
   font-size: 12px;
