@@ -2,6 +2,7 @@
 PDF文件解析服务
 职责：解析PDF/MD/TXT/DOCX教材文件，提取章节结构和内容
 """
+import os
 import re
 from pathlib import Path
 from typing import List, Dict
@@ -18,7 +19,7 @@ class PDFParserService:
 
     def __init__(self):
         self.chapter_pattern = re.compile(r'^第[一二三四五六七八九十百千万\d]+章\s*')
-        self.max_chars = 8000
+        self.max_chars = int(os.getenv("PARSE_CHUNK_CHARS", "50000"))
 
     def parse(self, file_path: str) -> Dict:
         """解析PDF文件"""
@@ -109,8 +110,6 @@ class PDFParserService:
 
     def _create_chapter(self, title: str, contents: List[str], start_page: int, chapter_index: int) -> Chapter:
         content = '\n'.join(contents)
-        if len(content) > self.max_chars:
-            content = content[:self.max_chars]
         return Chapter(
             chapter_id=f"ch_{chapter_index:03d}",
             title=title,
@@ -167,14 +166,15 @@ class TxtParserService:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # 按空行分割段落，每1000字一组
+        # 按空行分割段落，每批约 PARSE_CHUNK_CHARS 字
         paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
         chapters = []
         current_content = ""
         chapter_id = 0
+        max_chars = int(os.getenv("PARSE_CHUNK_CHARS", "50000"))
 
         for para in paragraphs:
-            if len(current_content) + len(para) > 1000 and current_content:
+            if len(current_content) + len(para) > max_chars and current_content:
                 chapters.append(Chapter(
                     chapter_id=f"ch_{chapter_id:03d}",
                     title=f"第{chapter_id + 1}节",

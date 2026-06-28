@@ -15,7 +15,7 @@ load_dotenv()
 class LLMClient:
     """LLM统一客户端（支持多种后端）"""
 
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, model: str = "deepseek-v4-flash"):
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, model: str = "deepseek-v4-pro"):
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.base_url = (base_url or os.getenv("LLM_API_BASE", "https://api.deepseek.com")).rstrip("/")
         self.model = os.getenv("LLM_MODEL", model)

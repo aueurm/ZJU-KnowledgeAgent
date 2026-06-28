@@ -19,6 +19,10 @@
           <span class="label">章节：</span>
           <span class="value">{{ node.chapter }}</span>
         </div>
+        <div v-if="node.module" class="info-row">
+          <span class="label">模块：</span>
+          <span class="value">{{ node.module }}</span>
+        </div>
         <div class="info-row">
           <span class="label">页码：</span>
           <span class="value">{{ node.page }}</span>

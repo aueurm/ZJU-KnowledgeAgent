@@ -13,15 +13,18 @@ class KnowledgeExtractorService:
 
     # 知识点提取Prompt模板
     EXTRACT_PROMPT = """
-从以下章节内容中提取核心知识点。
+从以下教材内容中提取知识点，不要做摘要。
 
 【章节内容】
 {chapter_content}
 
 【提取要求】
 1. 提取核心概念、定理、方法、现象等知识点
-2. 每个知识点包含：name（名称）、definition（定义）、category（类型）
-3. 识别知识点间的关系（前置依赖/并列/包含/应用）
+2. 本批目标提取约 {target_nodes} 个知识点；内容很少时可少一些，但不要只提取几个总括词
+3. 每个【片段】都要覆盖，优先提取原文反复出现、被定义、被举例或参与关系的术语
+4. 每个知识点包含：name（名称）、definition（定义）、category（类型）、module（大模块）、page（最相关页码，整数）
+5. 识别知识点间的关系（前置依赖/并列/包含/应用）
+6. 如果【片段】标注了页码范围，page 必须取该范围内最相关的一页
 
 【关系类型说明】
 - prerequisite: 前置依赖（学习B需先掌握A）
@@ -33,7 +36,7 @@ class KnowledgeExtractorService:
 严格输出JSON，格式如下：
 {{
   "nodes": [
-    {{"id": "n1", "name": "...", "definition": "...", "category": "..."}}
+    {{"id": "n1", "name": "...", "definition": "...", "category": "...", "module": "下肢", "page": 12}}
   ],
   "edges": [
     {{"source": "n1", "target": "n2", "relation_type": "...", "description": "..."}}
@@ -52,14 +55,18 @@ class KnowledgeExtractorService:
         返回：节点和边列表
         """
         # 构建Prompt
-        prompt = self.EXTRACT_PROMPT.format(chapter_content=chapter_content)
+        target_nodes = min(80, max(12, len(chapter_content) // 1200))
+        prompt = self.EXTRACT_PROMPT.format(
+            chapter_content=chapter_content,
+            target_nodes=target_nodes
+        )
 
         # 调用LLM（同步调用）
         response = self.llm.call_sync(
             prompt,
             temperature=0.2,
             response_format={"type": "json_object"},
-            max_tokens=int(os.getenv("LLM_EXTRACT_MAX_TOKENS", "4096"))
+            max_tokens=int(os.getenv("LLM_EXTRACT_MAX_TOKENS", "12000"))
         )
         if response.startswith("LLM调用失败"):
             raise RuntimeError(response)

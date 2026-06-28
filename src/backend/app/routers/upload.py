@@ -8,7 +8,9 @@ from typing import List
 import tempfile
 import os
 import asyncio
+import json
 import pathlib
+import re
 
 from app.models import TextbookUploadResponse, Chapter
 from app.services.logger import get_logger
@@ -20,13 +22,49 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 # 教材存储（与graph.py共用）
-_textbooks: dict = {}
+DATA_DIR = pathlib.Path(__file__).resolve().parents[2] / "data"
+HISTORY_FILE = DATA_DIR / "textbooks.json"
+
+
+def _load_textbooks() -> dict:
+    if not HISTORY_FILE.exists():
+        return {}
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for item in data.values():
+            if item.get("status") == "parsing":
+                item.update(status="failed", current_step="上次解析被中断", error="服务重启或进程退出，解析任务未完成")
+        return data
+    except Exception:
+        logger.warning("教材历史读取失败，将使用空历史: %s", HISTORY_FILE, exc_info=True)
+        return {}
+
+
+_textbooks: dict = _load_textbooks()
+
+
+def _save_textbooks():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(_textbooks, f, ensure_ascii=False)
+
+
+def _next_textbook_id() -> str:
+    nums = []
+    for textbook_id in _textbooks:
+        try:
+            nums.append(int(textbook_id.rsplit("_", 1)[-1]))
+        except ValueError:
+            pass
+    return f"book_{max(nums, default=0) + 1:03d}"
 
 
 def update_textbook_status(textbook_id: str, **fields):
     """更新教材状态，后台任务和轮询接口共用。"""
     if textbook_id in _textbooks:
         _textbooks[textbook_id].update(fields)
+        _save_textbooks()
 
 
 @router.post("", response_model=TextbookUploadResponse)
@@ -47,7 +85,7 @@ async def upload_textbook(file: UploadFile = File(...), background_tasks: Backgr
         raise HTTPException(status_code=400, detail="不支持的文件格式")
 
     # 生成教材ID
-    textbook_id = f"book_{len(_textbooks) + 1:03d}"
+    textbook_id = _next_textbook_id()
 
     # 保存到临时文件 - 使用项目本地目录避免中文路径问题
     temp_dir = pathlib.Path(__file__).parent.parent.parent / "temp"
@@ -72,6 +110,7 @@ async def upload_textbook(file: UploadFile = File(...), background_tasks: Backgr
         "warning": None,
         "chapters": []
     }
+    _save_textbooks()
 
     # 启动后台处理管道
     if background_tasks:
@@ -133,36 +172,46 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
             for chapter_data in chapters
         ]
         total_chars = sum(chapter.char_count for chapter in normalized_chapters)
+        batch_chars = max(1000, int(os.getenv("EXTRACT_BATCH_CHARS", "50000")))
+        extraction_batches = create_extraction_batches(normalized_chapters, batch_chars)
+        if not extraction_batches:
+            raise ValueError("文件内容为空，无法提取知识点")
+        update_textbook_status(
+            textbook_id,
+            progress=20,
+            current_step=f"文件解析完成，共 {len(normalized_chapters)} 个内容片段，合并为 {len(extraction_batches)} 批提取"
+        )
+
         concurrency = max(1, int(os.getenv("EXTRACT_CONCURRENCY", "3")))
         semaphore = asyncio.Semaphore(concurrency)
         completed = 0
 
-        async def extract_one(index: int, chapter: Chapter):
+        async def extract_one(index: int, batch: Chapter):
             nonlocal completed
             async with semaphore:
                 update_textbook_status(
                     textbook_id,
-                    progress=20 + int(65 * completed / len(normalized_chapters)),
-                    current_step=f"正在提取知识 {completed}/{len(normalized_chapters)}（并发 {concurrency}）：{chapter.title}"
+                    progress=20 + int(65 * completed / len(extraction_batches)),
+                    current_step=f"正在提取知识 {completed}/{len(extraction_batches)}（每批约 {batch_chars} 字，并发 {concurrency}）：{batch.title}"
                 )
                 result = await loop.run_in_executor(
                     None,
                     extractor.extract,
-                    chapter.content,
-                    chapter.title,
+                    batch.content,
+                    batch.title,
                     textbook_id
                 )
                 completed += 1
                 update_textbook_status(
                     textbook_id,
-                    progress=20 + int(65 * completed / len(normalized_chapters)),
-                    current_step=f"已提取知识 {completed}/{len(normalized_chapters)}：{chapter.title}"
+                    progress=20 + int(65 * completed / len(extraction_batches)),
+                    current_step=f"已提取知识 {completed}/{len(extraction_batches)}：{batch.title}"
                 )
-                return index, chapter, result
+                return index, batch, result
 
         results = await asyncio.gather(*[
-            extract_one(index, chapter)
-            for index, chapter in enumerate(normalized_chapters, start=1)
+            extract_one(index, batch)
+            for index, batch in enumerate(extraction_batches, start=1)
         ])
 
         all_nodes = []
@@ -176,9 +225,10 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
                 node.setdefault("name", old_id)
                 node.setdefault("definition", "")
                 node.setdefault("category", "知识点")
+                page, chapter_title = infer_node_location(node, chapter)
                 node["source"] = textbook_id
-                node["chapter"] = chapter.title
-                node.setdefault("page", max(1, chapter.page_start))
+                node["chapter"] = chapter_title
+                node["page"] = page
                 all_nodes.append(node)
 
             for edge in result.get("edges", []):
@@ -190,6 +240,11 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
 
         if not all_nodes:
             raise ValueError("知识提取未返回节点，请检查 LLM_API_BASE、LLM_MODEL 和 API Key 是否可用")
+
+        extract_warning = None
+        min_expected_nodes = max(20, min(300, total_chars // 3000))
+        if len(all_nodes) < min_expected_nodes:
+            extract_warning = f"知识点数量偏少：提取到 {len(all_nodes)} 个，建议检查模型输出或适当降低 EXTRACT_BATCH_CHARS"
 
         # 更新字数统计
         update_textbook_status(
@@ -217,13 +272,13 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
 
         # Step 4: 构建RAG索引
         update_textbook_status(textbook_id, progress=92, current_step="正在建立 RAG 索引")
-        warning = None
+        warning = extract_warning
         try:
             rag_service = get_rag_service()
             chunks = create_chunks(normalized_chapters, textbook_id)
             await loop.run_in_executor(None, rag_service.build_index, textbook_id, chunks)
         except Exception as e:
-            warning = f"RAG 索引失败：{e}"
+            warning = f"{warning}；RAG 索引失败：{e}" if warning else f"RAG 索引失败：{e}"
             logger.error("RAG索引失败，ID: %s | 错误: %s", textbook_id, str(e), exc_info=True)
 
         # Step 5: 更新状态为完成
@@ -251,6 +306,99 @@ async def process_textbook_pipeline(textbook_id: str, file_path: str):
         if os.path.exists(file_path):
             os.unlink(file_path)
             logger.info("临时文件已删除: %s", file_path)
+
+
+def create_extraction_batches(chapters: List[Chapter], max_chars: int) -> List[Chapter]:
+    """把解析片段合并成大批次，减少 LLM 调用次数。"""
+    segments = []
+    for chapter in chapters:
+        content = (chapter.content or "").strip()
+        if not content:
+            continue
+        for part_index, start in enumerate(range(0, len(content), max_chars)):
+            part = content[start:start + max_chars]
+            suffix = f"-{part_index + 1}" if len(content) > max_chars else ""
+            segments.append(Chapter(
+                chapter_id=f"{chapter.chapter_id}{suffix}",
+                title=f"{chapter.title}{suffix}",
+                page_start=chapter.page_start,
+                page_end=chapter.page_end,
+                content=part,
+                char_count=len(part)
+            ))
+
+    batches = []
+    current = []
+    current_len = 0
+
+    def flush():
+        if not current:
+            return
+        batch_index = len(batches)
+        content = "\n\n".join(
+            f"【片段 {i + 1}：{chapter.title}，页 {chapter.page_start}-{chapter.page_end}】\n{chapter.content}"
+            for i, chapter in enumerate(current)
+        )
+        title = current[0].title if len(current) == 1 else f"{current[0].title} 等 {len(current)} 段"
+        batches.append(Chapter(
+            chapter_id=f"batch_{batch_index:03d}",
+            title=title,
+            page_start=current[0].page_start,
+            page_end=current[-1].page_end,
+            content=content,
+            char_count=len(content)
+        ))
+
+    for chapter in segments:
+        if current and current_len + chapter.char_count > max_chars:
+            flush()
+            current = []
+            current_len = 0
+        current.append(chapter)
+        current_len += chapter.char_count
+
+    flush()
+    return batches
+
+
+def infer_node_location(node: dict, batch: Chapter) -> tuple[int, str]:
+    """从 LLM page 或批次片段标记推断节点页码。"""
+    markers = [
+        (m.start(), m.group(1), int(m.group(2)), int(m.group(3)))
+        for m in re.finditer(r"【片段\s+\d+：(.+?)，页\s+(\d+)-(\d+)】", batch.content)
+    ]
+
+    page = parse_page(node.get("page"))
+    if page:
+        for _, title, start, end in markers:
+            if start <= page <= end:
+                return page, title
+        return page, str(node.get("chapter") or batch.title)
+
+    needle = str(node.get("name") or "").strip()
+    if not needle:
+        needle = str(node.get("definition") or "").strip()[:12]
+    if needle:
+        pos = batch.content.find(needle)
+        if pos >= 0:
+            selected = None
+            for marker in markers:
+                if marker[0] <= pos:
+                    selected = marker
+                else:
+                    break
+            if selected:
+                _, title, start, _ = selected
+                return max(1, start), title
+
+    return max(1, batch.page_start), str(node.get("chapter") or batch.title)
+
+
+def parse_page(value) -> int | None:
+    if isinstance(value, int):
+        return max(1, value)
+    match = re.search(r"\d+", str(value or ""))
+    return max(1, int(match.group(0))) if match else None
 
 
 def create_chunks(chapters: List, textbook_id: str) -> List[dict]:

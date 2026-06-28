@@ -1,5 +1,9 @@
 <template>
   <div class="graph-canvas" ref="container">
+    <div v-if="hasData" class="graph-toolbar">
+      <button v-if="activeModule" @click.stop="backToModules">返回模块</button>
+      <span>{{ activeModule || '模块概览' }}</span>
+    </div>
     <div v-if="loading" class="graph-overlay">
       正在加载图谱...
     </div>
@@ -38,6 +42,7 @@ export default {
 
     const hasData = ref(false)
     const notice = ref('')
+    const activeModule = ref('')
 
     const shortLabel = (value) => {
       const label = String(value || '')
@@ -92,6 +97,12 @@ export default {
       // 节点点击事件
       graph.on('node:click', (e) => {
         const node = e.item.getModel()
+        if (node.isModule) {
+          activeModule.value = node.moduleName
+          scheduleUpdate()
+          return
+        }
+        if (node.isHub) return
         emit('nodeClick', node)
       })
     }
@@ -112,13 +123,18 @@ export default {
         return
       }
 
-      const visibleNodes = nodes.slice(0, MAX_RENDER_NODES)
+      const modules = buildModules(nodes)
+      const renderGraph = activeModule.value
+        ? buildModuleGraph(activeModule.value, modules, edges)
+        : buildOverviewGraph(modules, edges)
+
+      const visibleNodes = renderGraph.nodes.slice(0, MAX_RENDER_NODES)
       const visibleIds = new Set(visibleNodes.map(n => n.id))
       const colors = ['#1890ff', '#52c41a', '#fa8c16', '#f5222d', '#722ed1', '#13c2c2']
       const sourceColors = {}
       let nextColor = 0
       const nodeData = positionNodes(visibleNodes.map(n => {
-        const source = n.source || 'default'
+        const source = n.moduleName || n.source || 'default'
         if (!sourceColors[source]) {
           sourceColors[source] = colors[nextColor % colors.length]
           nextColor++
@@ -126,16 +142,19 @@ export default {
         return {
           ...n,
           label: shortLabel(n.name),
-          size: Math.min(44, 30 + (n.freq || 1) * 4),
+          size: n.isModule
+            ? Math.min(72, 38 + Math.sqrt(n.count || 1) * 7)
+            : Math.min(48, 30 + (n.freq || 1) * 4),
           style: {
-            fill: sourceColors[source]
+            fill: n.isHub ? '#13c2c2' : sourceColors[source]
           }
         }
       }))
 
-      const edgeData = edges
+      const edgeData = renderGraph.edges
         .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
-        .map(e => ({
+        .map((e, index) => ({
+          id: e.id || `edge_${index}`,
           source: e.source,
           target: e.target,
           relationType: e.relation_type
@@ -143,6 +162,77 @@ export default {
 
       renderData({ nodes: nodeData, edges: edgeData })
       graph.fitView(32)
+    }
+
+    const buildModules = (nodes) => {
+      const fields = ['module', 'chapter', 'category']
+      let field = fields.find(name => new Set(nodes.map(n => cleanModule(n[name]))).size > 1) || 'chapter'
+      const modules = {}
+      nodes.forEach(node => {
+        const name = cleanModule(node[field])
+        if (!modules[name]) modules[name] = []
+        modules[name].push(node)
+      })
+      return modules
+    }
+
+    const cleanModule = (value) => String(value || '未分组').replace(/\s+/g, ' ').trim() || '未分组'
+
+    const buildOverviewGraph = (modules, edges) => {
+      const moduleByNode = {}
+      Object.entries(modules).forEach(([name, list]) => {
+        list.forEach(node => { moduleByNode[node.id] = name })
+      })
+      const moduleNodes = Object.entries(modules).map(([name, list]) => ({
+        id: `module_${name}`,
+        name,
+        moduleName: name,
+        isModule: true,
+        count: list.length,
+        category: '模块',
+        definition: `包含 ${list.length} 个知识点`,
+        page: Math.min(...list.map(n => Number(n.page) || 1))
+      }))
+      const seen = new Set()
+      const moduleEdges = []
+      edges.forEach(edge => {
+        const source = moduleByNode[edge.source]
+        const target = moduleByNode[edge.target]
+        if (!source || !target || source === target) return
+        const key = [source, target].sort().join('->')
+        if (seen.has(key)) return
+        seen.add(key)
+        moduleEdges.push({
+          source: `module_${source}`,
+          target: `module_${target}`,
+          relation_type: 'related'
+        })
+      })
+      notice.value = `${moduleNodes.length} 个模块，点击模块查看内部图谱`
+      return { nodes: moduleNodes, edges: moduleEdges }
+    }
+
+    const buildModuleGraph = (moduleName, modules, edges) => {
+      const nodes = modules[moduleName] || []
+      const nodeIds = new Set(nodes.map(n => n.id))
+      const hubId = `hub_${moduleName}`
+      const hub = {
+        id: hubId,
+        name: moduleName,
+        moduleName,
+        isHub: true,
+        category: '模块',
+        definition: `包含 ${nodes.length} 个知识点`,
+        page: Math.min(...nodes.map(n => Number(n.page) || 1))
+      }
+      const hubEdges = nodes.map(node => ({
+        source: hubId,
+        target: node.id,
+        relation_type: 'contains'
+      }))
+      const innerEdges = edges.filter(edge => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+      notice.value = `${moduleName}：${nodes.length} 个知识点`
+      return { nodes: [hub, ...nodes], edges: [...hubEdges, ...innerEdges] }
     }
 
     const renderData = (data) => {
@@ -158,6 +248,11 @@ export default {
     const scheduleUpdate = () => {
       if (frame) cancelAnimationFrame(frame)
       frame = requestAnimationFrame(updateGraph)
+    }
+
+    const backToModules = () => {
+      activeModule.value = ''
+      scheduleUpdate()
     }
 
     const positionNodes = (nodes) => {
@@ -189,7 +284,10 @@ export default {
     }
 
     // 监听数据变化
-    watch(() => props.graphData, scheduleUpdate)
+    watch(() => props.graphData, () => {
+      activeModule.value = ''
+      scheduleUpdate()
+    })
 
     onMounted(() => {
       initGraph()
@@ -203,7 +301,7 @@ export default {
       window.removeEventListener('resize', handleResize)
     })
 
-    return { container, hasData, notice }
+    return { container, hasData, notice, activeModule, backToModules }
   }
 }
 </script>
@@ -232,6 +330,32 @@ export default {
   color: #ff4d4f;
   padding: 24px;
   text-align: center;
+}
+
+.graph-toolbar {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #333;
+  font-size: 13px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.graph-toolbar button {
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: white;
+  color: #1890ff;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
 }
 
 .graph-notice {

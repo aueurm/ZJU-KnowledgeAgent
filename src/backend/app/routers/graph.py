@@ -3,15 +3,32 @@
 职责：获取教材图谱、节点详情、整合图谱
 共享函数：store_graph, get_rag_service（供其他模块调用）
 """
+import json
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from typing import Optional
 from app.models import GraphData
 from app.services.rag_service import RAGService
 
 router = APIRouter()
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+GRAPH_DIR = DATA_DIR / "graphs"
 
 # 图谱数据存储
-_graphs: dict = {}
+def _load_graphs() -> dict:
+    graphs = {}
+    if not GRAPH_DIR.exists():
+        return graphs
+    for path in GRAPH_DIR.glob("*.json"):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                graphs[path.stem] = GraphData(**json.load(f))
+        except Exception:
+            continue
+    return graphs
+
+
+_graphs: dict = _load_graphs()
 
 # RAG服务单例
 _rag_service: Optional[RAGService] = None
@@ -28,6 +45,9 @@ def get_rag_service() -> RAGService:
 def store_graph(textbook_id: str, graph: GraphData):
     """保存图谱数据（供其他模块调用）"""
     _graphs[textbook_id] = graph
+    GRAPH_DIR.mkdir(parents=True, exist_ok=True)
+    with open(GRAPH_DIR / f"{textbook_id}.json", "w", encoding="utf-8") as f:
+        json.dump(graph.model_dump(), f, ensure_ascii=False)
 
 
 @router.get("/merged")
