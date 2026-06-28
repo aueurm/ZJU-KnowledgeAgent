@@ -4,7 +4,6 @@ WORKDIR /app/frontend
 COPY package*.json ./
 COPY src/frontend/index.html ./
 COPY src/frontend/src ./src/
-COPY src/frontend/uno.config.js ./
 COPY src/frontend/vite.config.js ./
 RUN npm ci
 RUN npm run build
