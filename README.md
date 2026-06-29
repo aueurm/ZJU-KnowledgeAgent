@@ -18,73 +18,44 @@ AI全栈极速黑客松项目 - 将多本教材整合压缩到30%，教学效果
 | Python | ≥3.9 |
 | Node.js | ≥18.0 |
 
-## 安装步骤
+## 快速开始
 
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/aueurm/ZJU-.git
-cd ZJU-
+git clone https://github.com/aueurm/ZJU-KnowledgeAgent.git
+cd ZJU-KnowledgeAgent
 ```
 
-### 2. 后端安装
+### 2. 安装依赖
 
 ```bash
 # 创建虚拟环境（推荐）
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或 venv\Scripts\activate  # Windows
+python -m venv .venv
 
-# 安装依赖
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# macOS / Linux
+source .venv/bin/activate
+
+# 安装后端依赖
 pip install -r requirements.txt
-```
 
-### 3. 前端安装
-
-```bash
+# 安装前端依赖
 npm install
 ```
 
 ## 配置说明
 
-### 环境变量配置
-
-创建 `.env` 文件（参考 `.env.example`）：
-
-```env
-# LLM API配置（必填）
-LLM_API_KEY=your_api_key_here
-LLM_API_BASE=https://api.deepseek.com
-LLM_MODEL=deepseek-v4-pro
-LLM_TIMEOUT=120
-LLM_MAX_RETRIES=3
-LLM_THINKING=disabled
-LLM_EXTRACT_MAX_TOKENS=12000
-PARSE_CHUNK_CHARS=50000
-EXTRACT_BATCH_CHARS=50000
-EXTRACT_CONCURRENCY=3
-MERGE_HIGH_THRESHOLD=0.92
-MERGE_MID_THRESHOLD=0.80
-MERGE_NAME_THRESHOLD=0.75
-MIN_NODE_RETENTION=0.35
-MIN_EDGE_RETENTION=0.50
-
-# Embedding模型配置（可选，默认本地BGE）
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-
-# 服务端口（可选）
-BACKEND_PORT=8000
-FRONTEND_PORT=5173
-```
-
-### .env.example
-
-仓库提供 `.env.example` 作为配置模板，复制后填入实际值：
+仓库提供 `.env.example` 作为配置模板。首次运行只需要复制模板并填入 `LLM_API_KEY`，其他变量可以保持默认：
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入API密钥
+# Windows PowerShell 可用：Copy-Item .env.example .env
 ```
+
+如果本机没有 `BAAI/bge-small-zh-v1.5` 缓存，系统会先用轻量内存检索兜底；需要更好的语义检索效果时，再配置本地 embedding 模型。
 
 ## 启动命令
 
@@ -94,7 +65,7 @@ cp .env.example .env
 python start.py
 ```
 
-启动后浏览器会自动打开 `http://localhost:5173`。
+启动后浏览器默认打开 `http://localhost:5173`；如果端口被占用，以终端输出的地址为准。
 
 ### 开发模式
 
@@ -116,7 +87,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # 另开终端，回到仓库根目录构建前端
 npm run build
-# 部署dist目录
+# 部署 src/frontend/dist 目录
 ```
 
 ## 使用说明
@@ -141,7 +112,7 @@ npm run build
 
 ### 4. RAG问答
 
-- 刬换到右侧"RAG问答"面板
+- 切换到右侧"RAG问答"面板
 - 输入问题，获取带引用来源的回答
 - 点击引用查看原文内容
 
@@ -153,7 +124,7 @@ npm run build
 ## 项目结构
 
 ```
-ZJU-/
+ZJU-KnowledgeAgent/
 ├── docs/
 │   ├── 需求分析.md        # 子问题分解与分析
 │   ├── 系统设计.md        # 架构设计与API接口
